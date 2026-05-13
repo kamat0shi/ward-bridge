@@ -1,0 +1,28 @@
+# Node
+node_modules/
+**/node_modules/
+*.log
+npm-debug.log*
+
+# Build artifacts
+dist/
+**/dist/
+.vite/
+**/.vite/
+
+# Local-only tools and config
+cloudflared.exe
+.env
+.env.local
+*.local
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Python (legacy bridge.py)
+__pycache__/
+*.pyc
+venv/
+.venv/

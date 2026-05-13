@@ -1,0 +1,12 @@
+{
+  "name": "ward-bridge-tools",
+  "private": true,
+  "version": "0.1.0",
+  "type": "commonjs",
+  "scripts": {
+    "deliver": "node deliver-any.js"
+  },
+  "dependencies": {
+    "ethers": "^6.13.2"
+  }
+}
