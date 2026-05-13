@@ -234,6 +234,39 @@ footer code { font-family: var(--mono); }
   border-bottom-color: var(--accent);
 }
 
+.hash-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
+  padding: 10px 12px;
+  background: #0e0e16;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.hash-label {
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.hash-full {
+  font-family: var(--mono);
+  font-size: 12px;
+  word-break: break-all;
+  flex: 1 1 280px;
+  color: var(--text);
+}
+.ghost.mini {
+  padding: 4px 10px;
+  font-size: 12px;
+  text-decoration: none;
+  text-align: center;
+}
+a.ghost.mini { color: var(--muted); }
+a.ghost.mini:hover { color: var(--text); }
+
 .ok-banner {
   margin-top: 16px;
   padding: 14px 16px;

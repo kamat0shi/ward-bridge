@@ -17,6 +17,7 @@ import {
   isHash,
   type Hex,
 } from 'viem'
+import { HashRow } from './HashRow'
 import {
   BSC_EXPLORER,
   BSC_MAILBOX,
@@ -86,22 +87,40 @@ function parseMessage(hex: Hex): Parsed {
   }
 }
 
-async function fetchValidatorCheckpoint(v: (typeof VALIDATORS)[number], index: number) {
-  const url = `${v.base}${v.prefix}checkpoint_${index}_with_id.json`
-  const r = await fetch(url)
-  if (!r.ok) return null
-  return r.json() as Promise<{
-    value: {
-      checkpoint: {
-        merkle_tree_hook_address: string
-        mailbox_domain: number
-        root: string
-        index: number
-      }
-      message_id: string
+type CheckpointJson = {
+  value: {
+    checkpoint: {
+      merkle_tree_hook_address: string
+      mailbox_domain: number
+      root: string
+      index: number
     }
-    signature: { r: string; s: string; v: number }
-  }>
+    message_id: string
+  }
+  signature: { r: string; s: string; v: number }
+}
+
+const CORS_PROXY = 'https://api.codetabs.com/v1/proxy/?quest='
+
+async function fetchValidatorCheckpoint(
+  v: (typeof VALIDATORS)[number],
+  index: number,
+): Promise<CheckpointJson | null> {
+  const url = `${v.base}${v.prefix}checkpoint_${index}_with_id.json`
+  try {
+    const direct = await fetch(url)
+    if (direct.ok) return (await direct.json()) as CheckpointJson
+    if (direct.status === 404) return null
+  } catch {
+    // CORS-blocked or network failure — fall through to proxy
+  }
+  try {
+    const viaProxy = await fetch(CORS_PROXY + encodeURIComponent(url))
+    if (!viaProxy.ok) return null
+    return (await viaProxy.json()) as CheckpointJson
+  } catch {
+    return null
+  }
 }
 
 function pad32hex(addr: Hex): string {
@@ -381,12 +400,7 @@ export function ClaimForm() {
 
           {claimTxHash && (
             <div className="result">
-              <p>
-                BSC claim tx:{' '}
-                <a target="_blank" rel="noopener noreferrer" href={claimTxUrl!}>
-                  {claimTxHash.slice(0, 18)}…
-                </a>
-              </p>
+              <HashRow label="BSC claim tx" hash={claimTxHash} href={claimTxUrl!} />
               {isSuccess && (
                 <p className="ok">
                   ✅ process() прошёл. {formatEther(prepared.parsed.bodyAmount)} WARD выдан

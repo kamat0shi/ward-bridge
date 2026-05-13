@@ -19,6 +19,7 @@ import {
   parseEther,
 } from 'viem'
 import { ROUTER_ABI } from './abi'
+import { HashRow } from './HashRow'
 import {
   BSC_EXPLORER,
   BSC_MAILBOX,
@@ -372,12 +373,7 @@ export function BridgeForm() {
 
       {txHash && (
         <div className="result">
-          <p>
-            Tx (Warden):{' '}
-            <a target="_blank" rel="noopener noreferrer" href={explorerTxUrl!}>
-              {txHash.slice(0, 18)}…
-            </a>
-          </p>
+          <HashRow label="Tx (Warden)" hash={txHash} href={explorerTxUrl!} />
 
           {originConfirmed && target && (
             <div className="delivery">
@@ -387,20 +383,25 @@ export function BridgeForm() {
                   <p className="ok">
                     ✅ Получено {formatEther(target.amount)} WARD на {target.recipient.slice(0, 10)}…
                   </p>
-                  {deliveryTxUrl && (
-                    <p>
-                      BSC tx:{' '}
-                      <a target="_blank" rel="noopener noreferrer" href={deliveryTxUrl}>
-                        {deliveryQuery.data.tx!.slice(0, 18)}…
-                      </a>
-                    </p>
+                  {deliveryQuery.data.tx && deliveryTxUrl && (
+                    <HashRow
+                      label="BSC tx"
+                      hash={deliveryQuery.data.tx}
+                      href={deliveryTxUrl}
+                    />
                   )}
                 </>
               ) : (
-                <p className="muted">
-                  Ожидаем Transfer-событие на BSC… (опрос каждые 15 с от блока{' '}
-                  {target.fromBlock.toString()})
-                </p>
+                <>
+                  <p className="muted">
+                    Ожидаем Transfer-событие на BSC… (опрос каждые 15 с от блока{' '}
+                    {target.fromBlock.toString()})
+                  </p>
+                  <p className="muted">
+                    Если за 10+ минут ничего не пришло — скопируй tx-hash выше и заклеймь
+                    вручную через вкладку «Ручной claim».
+                  </p>
+                </>
               )}
               <p>
                 Hyperlane:{' '}
