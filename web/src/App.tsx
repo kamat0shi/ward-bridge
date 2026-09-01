@@ -23,7 +23,7 @@ export default function App() {
   return (
     <main className="container">
       <header>
-        <h1>WARD ↔ BSC bridge</h1>
+        <h1>WARD bridge: Warden ↔ Base / BSC</h1>
         <p className="subtitle">
           Отправка через Hyperlane warp route + ручной claim если автоматический relayer не доставил message.
           Подписание идёт в вашем кошельке — приватный ключ остаётся в браузере.
@@ -64,7 +64,7 @@ export default function App() {
               className={`tab ${tab === 'claim' ? 'active' : ''}`}
               onClick={() => setTab('claim')}
             >
-              2. Ручной claim
+              2. Ручной claim Base / BSC
             </button>
           </div>
 

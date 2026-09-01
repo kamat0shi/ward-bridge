@@ -1,13 +1,14 @@
 import { createConfig, http } from 'wagmi'
-import { bsc } from 'wagmi/chains'
+import { base, bsc } from 'wagmi/chains'
 import { injected } from 'wagmi/connectors'
 import { wardenProtocol } from './chains'
 
 export const config = createConfig({
-  chains: [wardenProtocol, bsc],
+  chains: [wardenProtocol, base, bsc],
   connectors: [injected({ shimDisconnect: true })],
   transports: {
     [wardenProtocol.id]: http(),
+    [base.id]: http(),
     [bsc.id]: http(),
   },
 })

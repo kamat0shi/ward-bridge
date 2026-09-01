@@ -8,33 +8,84 @@ import {
   useWriteContract,
 } from 'wagmi'
 import { simulateContract } from 'wagmi/actions'
-import { bsc as bscChain } from 'viem/chains'
+import { base as baseChain, bsc as bscChain } from 'viem/chains'
 import {
   BaseError,
   ContractFunctionRevertedError,
   decodeEventLog,
   formatEther,
   isHash,
+  keccak256,
   type Hex,
 } from 'viem'
 import { HashRow } from './HashRow'
 import {
+  BASE_EXPLORER,
+  BASE_MAILBOX,
+  BASE_MERKLE_HOOK,
+  BASE_VALIDATORS,
+  BASE_WARP_TOKEN,
+  baseClient,
   BSC_EXPLORER,
   BSC_MAILBOX,
+  BSC_WARP_TOKEN,
   bscClient,
   MAILBOX_ABI,
   MERKLE_HOOK_ABI,
   MULTISIG_THRESHOLD,
-  VALIDATORS,
+  ROUTER_ADDRESS,
+  WARDEN_BASE_WARP_TOKEN,
   WARDEN_MAILBOX,
   WARDEN_MERKLE_HOOK,
+  WARDEN_VALIDATORS,
   wardenClient,
+  wardenProtocol,
 } from './chains'
+
+type ClaimDirection = 'base-to-warden' | 'warden-to-bsc'
+
+const CLAIM_ROUTES = {
+  'base-to-warden': {
+    sourceName: 'Base',
+    sourceChainId: baseChain.id,
+    sourceClient: baseClient,
+    sourceMailbox: BASE_MAILBOX,
+    sourceMerkleHook: BASE_MERKLE_HOOK,
+    expectedSender: BASE_WARP_TOKEN,
+    destinationName: 'Warden',
+    destinationChainId: wardenProtocol.id,
+    destinationClient: wardenClient,
+    destinationMailbox: WARDEN_MAILBOX,
+    expectedRecipient: WARDEN_BASE_WARP_TOKEN,
+    destinationExplorer: wardenProtocol.blockExplorers.default.url,
+    gasSymbol: 'WARD',
+    validators: BASE_VALIDATORS,
+  },
+  'warden-to-bsc': {
+    sourceName: 'Warden',
+    sourceChainId: wardenProtocol.id,
+    sourceClient: wardenClient,
+    sourceMailbox: WARDEN_MAILBOX,
+    sourceMerkleHook: WARDEN_MERKLE_HOOK,
+    expectedSender: ROUTER_ADDRESS,
+    destinationName: 'BSC',
+    destinationChainId: bscChain.id,
+    destinationClient: bscClient,
+    destinationMailbox: BSC_MAILBOX,
+    expectedRecipient: BSC_WARP_TOKEN,
+    destinationExplorer: BSC_EXPLORER,
+    gasSymbol: 'BNB',
+    validators: WARDEN_VALIDATORS,
+  },
+} as const
+
+type ClaimRoute = (typeof CLAIM_ROUTES)[ClaimDirection]
 
 type Parsed = {
   message: Hex
   messageId: Hex
   treeIndex: number
+  version: number
   nonce: number
   origin: number
   destination: number
@@ -50,6 +101,7 @@ type SigEntry = {
 }
 
 type Prepared = {
+  direction: ClaimDirection
   metadata: Hex
   message: Hex
   messageId: Hex
@@ -58,33 +110,6 @@ type Prepared = {
   treeIndex: number
   signers: Hex[]
   delivered: boolean
-}
-
-function extractRevert(err: unknown): string {
-  if (err instanceof BaseError) {
-    const revert = err.walk((e) => e instanceof ContractFunctionRevertedError)
-    if (revert instanceof ContractFunctionRevertedError) {
-      return revert.shortMessage + (revert.reason ? ` — ${revert.reason}` : '')
-    }
-    return err.shortMessage
-  }
-  return err instanceof Error ? err.message : String(err)
-}
-
-function parseMessage(hex: Hex): Parsed {
-  const h = hex.slice(2)
-  return {
-    message: hex,
-    messageId: ('0x' + '0'.repeat(64)) as Hex, // placeholder; filled by caller
-    treeIndex: 0,
-    nonce: parseInt(h.slice(2, 10), 16),
-    origin: parseInt(h.slice(10, 18), 16),
-    sender: ('0x' + h.slice(18, 82)) as Hex,
-    destination: parseInt(h.slice(82, 90), 16),
-    recipient: ('0x' + h.slice(90, 154)) as Hex,
-    bodyRecipient: ('0x' + h.slice(154 + 24, 154 + 64)) as Hex,
-    bodyAmount: BigInt('0x' + h.slice(154 + 64, 154 + 128)),
-  }
 }
 
 type CheckpointJson = {
@@ -100,74 +125,177 @@ type CheckpointJson = {
   signature: { r: string; s: string; v: number }
 }
 
-const CORS_PROXY = 'https://api.codetabs.com/v1/proxy/?quest='
+const JINA_PROXY = 'https://r.jina.ai/http://'
 
-async function fetchValidatorCheckpoint(
-  v: (typeof VALIDATORS)[number],
-  index: number,
-): Promise<CheckpointJson | null> {
-  const url = `${v.base}${v.prefix}checkpoint_${index}_with_id.json`
-  try {
-    const direct = await fetch(url)
-    if (direct.ok) return (await direct.json()) as CheckpointJson
-    if (direct.status === 404) return null
-  } catch {
-    // CORS-blocked or network failure — fall through to proxy
+function extractRevert(err: unknown): string {
+  if (err instanceof BaseError) {
+    const revert = err.walk((e) => e instanceof ContractFunctionRevertedError)
+    if (revert instanceof ContractFunctionRevertedError) {
+      return revert.shortMessage + (revert.reason ? ` — ${revert.reason}` : '')
+    }
+    return err.shortMessage
   }
-  try {
-    const viaProxy = await fetch(CORS_PROXY + encodeURIComponent(url))
-    if (!viaProxy.ok) return null
-    return (await viaProxy.json()) as CheckpointJson
-  } catch {
-    return null
-  }
+  return err instanceof Error ? err.message : String(err)
 }
 
 function pad32hex(addr: Hex): string {
   return addr.slice(2).padStart(64, '0')
 }
 
-async function buildPrepared(txHash: Hex): Promise<Prepared> {
-  const rcpt = await wardenClient.getTransactionReceipt({ hash: txHash })
+function sameHex(left: string, right: string): boolean {
+  return left.toLowerCase() === right.toLowerCase()
+}
 
-  let message: Hex | null = null
-  let messageId: Hex | null = null
-  let treeIndex: number | null = null
+function parseMessage(hex: Hex): Parsed {
+  const h = hex.slice(2)
+  if (h.length < 282) throw new Error('Некорректный Hyperlane message: слишком короткий payload.')
 
-  for (const log of rcpt.logs) {
-    if (log.address.toLowerCase() === WARDEN_MAILBOX.toLowerCase()) {
+  return {
+    message: hex,
+    messageId: (`0x${'0'.repeat(64)}`) as Hex,
+    treeIndex: 0,
+    version: parseInt(h.slice(0, 2), 16),
+    nonce: parseInt(h.slice(2, 10), 16),
+    origin: parseInt(h.slice(10, 18), 16),
+    sender: (`0x${h.slice(18, 82)}`) as Hex,
+    destination: parseInt(h.slice(82, 90), 16),
+    recipient: (`0x${h.slice(90, 154)}`) as Hex,
+    bodyRecipient: (`0x${h.slice(178, 218)}`) as Hex,
+    bodyAmount: BigInt(`0x${h.slice(218, 282)}`),
+  }
+}
+
+function parseCheckpointText(text: string): CheckpointJson {
+  try {
+    return JSON.parse(text) as CheckpointJson
+  } catch {
+    // r.jina.ai wraps JSON in a short Markdown preamble.
+    const start = text.indexOf('{')
+    const end = text.lastIndexOf('}')
+    if (start === -1 || end <= start) throw new Error('Validator returned invalid checkpoint JSON')
+    return JSON.parse(text.slice(start, end + 1)) as CheckpointJson
+  }
+}
+
+async function fetchWithTimeout(url: string, timeoutMs = 15_000): Promise<Response> {
+  const controller = new AbortController()
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(url, { signal: controller.signal })
+  } finally {
+    window.clearTimeout(timeout)
+  }
+}
+
+async function fetchValidatorCheckpoint(
+  validator: ClaimRoute['validators'][number],
+  index: number,
+): Promise<CheckpointJson | null> {
+  const url = `${validator.base}${validator.prefix}checkpoint_${index}_with_id.json`
+
+  try {
+    const direct = await fetchWithTimeout(url)
+    if (direct.ok) return parseCheckpointText(await direct.text())
+    if (direct.status === 404) return null
+  } catch {
+    // S3 does not expose browser CORS headers; use a read-only fallback below.
+  }
+
+  try {
+    // A cache buster avoids retaining a pre-publication 404 for a new checkpoint.
+    const viaProxy = await fetchWithTimeout(`${JINA_PROXY}${url}?claim=${Date.now()}`)
+    if (!viaProxy.ok) return null
+    return parseCheckpointText(await viaProxy.text())
+  } catch {
+    return null
+  }
+}
+
+function assertRouteMessage(parsed: Parsed, route: ClaimRoute) {
+  if (parsed.version !== 3) {
+    throw new Error(`Неподдерживаемая версия Hyperlane message: ${parsed.version}.`)
+  }
+  if (parsed.origin !== route.sourceChainId || parsed.destination !== route.destinationChainId) {
+    throw new Error(
+      `Транзакция отправляет message ${parsed.origin} → ${parsed.destination}, а выбран маршрут ` +
+        `${route.sourceChainId} → ${route.destinationChainId}.`,
+    )
+  }
+  if (!sameHex(parsed.sender, `0x${pad32hex(route.expectedSender)}`)) {
+    throw new Error(`Dispatch создан не WARD-контрактом маршрута ${route.sourceName}.`)
+  }
+  if (!sameHex(parsed.recipient, `0x${pad32hex(route.expectedRecipient)}`)) {
+    throw new Error(`Получатель message не WARD-контракт маршрута в ${route.destinationName}.`)
+  }
+}
+
+async function buildPrepared(
+  txHash: Hex,
+  direction: ClaimDirection,
+): Promise<Prepared> {
+  const route = CLAIM_ROUTES[direction]
+  const receipt = await route.sourceClient.getTransactionReceipt({ hash: txHash })
+  if (receipt.status !== 'success') throw new Error('Исходная транзакция завершилась с revert.')
+
+  const messages: Hex[] = []
+  const dispatchIds = new Set<string>()
+  const insertions = new Map<string, number>()
+
+  for (const log of receipt.logs) {
+    if (sameHex(log.address, route.sourceMailbox)) {
       try {
-        const dec = decodeEventLog({
-          abi: MAILBOX_ABI,
-          data: log.data,
-          topics: log.topics,
-        })
-        if (dec.eventName === 'Dispatch') message = dec.args.message as Hex
-        if (dec.eventName === 'DispatchId') messageId = dec.args.messageId as Hex
-      } catch {}
+        const decoded = decodeEventLog({ abi: MAILBOX_ABI, data: log.data, topics: log.topics })
+        if (decoded.eventName === 'Dispatch') messages.push(decoded.args.message as Hex)
+        if (decoded.eventName === 'DispatchId') {
+          dispatchIds.add((decoded.args.messageId as Hex).toLowerCase())
+        }
+      } catch {
+        // The Mailbox emits several event types; unrelated logs are expected.
+      }
     }
-    if (log.address.toLowerCase() === WARDEN_MERKLE_HOOK.toLowerCase()) {
+    if (sameHex(log.address, route.sourceMerkleHook)) {
       try {
-        const dec = decodeEventLog({
+        const decoded = decodeEventLog({
           abi: MERKLE_HOOK_ABI,
           data: log.data,
           topics: log.topics,
         })
-        if (dec.eventName === 'InsertedIntoTree') treeIndex = Number(dec.args.index)
-      } catch {}
+        if (decoded.eventName === 'InsertedIntoTree') {
+          insertions.set(
+            (decoded.args.messageId as Hex).toLowerCase(),
+            Number(decoded.args.index),
+          )
+        }
+      } catch {
+        // Ignore other hook events.
+      }
     }
   }
 
-  if (!message) throw new Error('Dispatch event not found in this tx')
-  if (treeIndex === null) throw new Error('InsertedIntoTree event not found')
-  if (!messageId) throw new Error('DispatchId event not found')
+  const matched = messages
+    .map((message) => ({ message, messageId: keccak256(message) }))
+    .filter(({ messageId }) => dispatchIds.has(messageId.toLowerCase()))
+    .filter(({ messageId }) => insertions.has(messageId.toLowerCase()))
 
+  if (matched.length === 0) {
+    throw new Error(
+      `В транзакции не найден полный WARD Dispatch на ${route.sourceName} ` +
+        '(Dispatch + DispatchId + InsertedIntoTree).',
+    )
+  }
+  if (matched.length > 1) {
+    throw new Error('В транзакции найдено несколько Dispatch. Для безопасности claim не собран.')
+  }
+
+  const { message, messageId } = matched[0]
+  const treeIndex = insertions.get(messageId.toLowerCase())!
   const parsed = parseMessage(message)
   parsed.messageId = messageId
   parsed.treeIndex = treeIndex
+  assertRouteMessage(parsed, route)
 
-  const alreadyDelivered = await bscClient.readContract({
-    address: BSC_MAILBOX,
+  const alreadyDelivered = await route.destinationClient.readContract({
+    address: route.destinationMailbox,
     abi: MAILBOX_ABI,
     functionName: 'delivered',
     args: [messageId],
@@ -175,62 +303,83 @@ async function buildPrepared(txHash: Hex): Promise<Prepared> {
 
   if (alreadyDelivered) {
     return {
-      metadata: '0x' as Hex,
+      direction,
+      metadata: '0x',
       message,
       messageId,
       parsed,
-      root: ('0x' + '0'.repeat(64)) as Hex,
+      root: (`0x${'0'.repeat(64)}`) as Hex,
       treeIndex,
       signers: [],
       delivered: true,
     }
   }
 
+  const checkpoints = await Promise.all(
+    route.validators.map(async (validator) => ({
+      validator,
+      checkpoint: await fetchValidatorCheckpoint(validator, treeIndex),
+    })),
+  )
+
   const sigs: SigEntry[] = []
   let root: Hex | null = null
+  const expectedHook = `0x${pad32hex(route.sourceMerkleHook)}`
 
-  for (const v of VALIDATORS) {
-    if (sigs.length >= MULTISIG_THRESHOLD) break
-    const cp = await fetchValidatorCheckpoint(v, treeIndex).catch(() => null)
-    if (!cp) continue
-    const msgIdInCp = cp.value?.message_id
-    if (!msgIdInCp || msgIdInCp.toLowerCase() !== messageId.toLowerCase()) continue
-    const cpRoot = ('0x' + cp.value.checkpoint.root.replace(/^0x/, '').padStart(64, '0')) as Hex
-    if (root && cpRoot.toLowerCase() !== root.toLowerCase()) continue
-    root = cpRoot
-    const r32 = cp.signature.r.replace(/^0x/, '').padStart(64, '0')
-    const s32 = cp.signature.s.replace(/^0x/, '').padStart(64, '0')
-    const vHex = cp.signature.v.toString(16).padStart(2, '0')
-    sigs.push({ validator: v.addr, sigPacked: r32 + s32 + vHex })
+  for (const { validator, checkpoint } of checkpoints) {
+    if (!checkpoint || sigs.length >= MULTISIG_THRESHOLD) continue
+    const value = checkpoint.value
+    const cp = value?.checkpoint
+    if (!value || !cp || !sameHex(value.message_id, messageId)) continue
+    if (Number(cp.mailbox_domain) !== route.sourceChainId) continue
+    if (Number(cp.index) !== treeIndex) continue
+    if (!sameHex(cp.merkle_tree_hook_address, expectedHook)) continue
+
+    const checkpointRoot = (`0x${cp.root.replace(/^0x/, '').padStart(64, '0')}`) as Hex
+    if (root && !sameHex(checkpointRoot, root)) continue
+
+    const r = checkpoint.signature?.r?.replace(/^0x/, '').padStart(64, '0')
+    const s = checkpoint.signature?.s?.replace(/^0x/, '').padStart(64, '0')
+    let v = Number(checkpoint.signature?.v)
+    if (v === 0 || v === 1) v += 27
+    if (!/^[0-9a-fA-F]{64}$/.test(r) || !/^[0-9a-fA-F]{64}$/.test(s) || (v !== 27 && v !== 28)) {
+      continue
+    }
+
+    root = checkpointRoot
+    sigs.push({
+      validator: validator.addr,
+      sigPacked: r + s + v.toString(16).padStart(2, '0'),
+    })
   }
 
   if (sigs.length < MULTISIG_THRESHOLD || !root) {
     throw new Error(
-      `Только ${sigs.length}/${MULTISIG_THRESHOLD} валидаторов опубликовали подпись для checkpoint ${treeIndex}. Подожди и попробуй ещё раз.`,
+      `Только ${sigs.length}/${MULTISIG_THRESHOLD} валидаторов опубликовали подходящую ` +
+        `подпись ${route.sourceName} checkpoint ${treeIndex}. Подожди и попробуй ещё раз.`,
     )
   }
 
   const inner =
-    pad32hex(WARDEN_MERKLE_HOOK) +
+    pad32hex(route.sourceMerkleHook) +
     root.slice(2) +
     treeIndex.toString(16).padStart(8, '0') +
-    sigs.map((s) => s.sigPacked).join('')
-
+    sigs.map((signature) => signature.sigPacked).join('')
   const headerStart = 8
   const headerEnd = headerStart + inner.length / 2
-  const aggHeader =
-    headerStart.toString(16).padStart(8, '0') +
-    headerEnd.toString(16).padStart(8, '0')
-  const metadata = ('0x' + aggHeader + inner) as Hex
+  const metadata = (`0x${headerStart.toString(16).padStart(8, '0')}${headerEnd
+    .toString(16)
+    .padStart(8, '0')}${inner}`) as Hex
 
   return {
+    direction,
     metadata,
     message,
     messageId,
     parsed,
     root,
     treeIndex,
-    signers: sigs.map((s) => s.validator),
+    signers: sigs.map((signature) => signature.validator),
     delivered: false,
   }
 }
@@ -240,6 +389,7 @@ export function ClaimForm() {
   const config = useConfig()
   const chainId = useChainId()
   const { switchChain, isPending: isSwitching } = useSwitchChain()
+  const [direction, setDirection] = useState<ClaimDirection>('base-to-warden')
   const [txHash, setTxHash] = useState('')
   const [prepared, setPrepared] = useState<Prepared | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -247,8 +397,11 @@ export function ClaimForm() {
   const [simError, setSimError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
 
+  const route = CLAIM_ROUTES[direction]
+  const preparedRoute = prepared ? CLAIM_ROUTES[prepared.direction] : route
+
   const {
-    writeContract,
+    writeContractAsync,
     data: claimTxHash,
     isPending: isWriting,
     error: writeError,
@@ -256,24 +409,33 @@ export function ClaimForm() {
   } = useWriteContract()
   const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({
     hash: claimTxHash,
-    chainId: bscChain.id,
+    chainId: preparedRoute.destinationChainId,
   })
 
-  const onWrongChain = isConnected && chainId !== bscChain.id
+  const onWrongChain = isConnected && chainId !== preparedRoute.destinationChainId
 
-  async function handleLoad() {
+  function clearPrepared() {
+    setPrepared(null)
     setLoadError(null)
     setSimError(null)
-    setPrepared(null)
     reset()
+  }
+
+  function handleDirectionChange(next: ClaimDirection) {
+    setDirection(next)
+    setTxHash('')
+    clearPrepared()
+  }
+
+  async function handleLoad() {
+    clearPrepared()
     if (!isHash(txHash)) {
       setLoadError('Неверный формат tx hash. Ожидается 0x… длиной 66 символов.')
       return
     }
     setLoading(true)
     try {
-      const p = await buildPrepared(txHash as Hex)
-      setPrepared(p)
+      setPrepared(await buildPrepared(txHash as Hex, direction))
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -283,23 +445,24 @@ export function ClaimForm() {
 
   async function handleClaim() {
     if (!prepared || prepared.delivered) return
+    const destination = CLAIM_ROUTES[prepared.direction]
     setSimError(null)
     setSubmitting(true)
     try {
       await simulateContract(config, {
-        address: BSC_MAILBOX,
+        address: destination.destinationMailbox,
         abi: MAILBOX_ABI,
         functionName: 'process',
         args: [prepared.metadata, prepared.message],
-        chainId: bscChain.id,
+        chainId: destination.destinationChainId,
         account: address,
       })
-      writeContract({
-        address: BSC_MAILBOX,
+      await writeContractAsync({
+        address: destination.destinationMailbox,
         abi: MAILBOX_ABI,
         functionName: 'process',
         args: [prepared.metadata, prepared.message],
-        chainId: bscChain.id,
+        chainId: destination.destinationChainId,
       })
     } catch (err) {
       setSimError(extractRevert(err))
@@ -308,29 +471,49 @@ export function ClaimForm() {
     }
   }
 
-  const claimTxUrl = claimTxHash ? `${BSC_EXPLORER}/tx/${claimTxHash}` : null
+  const claimTxUrl = claimTxHash
+    ? `${preparedRoute.destinationExplorer}/tx/${claimTxHash}`
+    : null
 
   return (
     <section className="card">
       <div className="row">
-        <label htmlFor="claim-tx">Warden tx hash</label>
+        <label htmlFor="claim-direction">Направление зависшего перевода</label>
+        <select
+          id="claim-direction"
+          value={direction}
+          onChange={(event) => handleDirectionChange(event.target.value as ClaimDirection)}
+        >
+          <option value="base-to-warden">Base → Warden</option>
+          <option value="warden-to-bsc">Warden → BSC</option>
+        </select>
+      </div>
+
+      <div className="row">
+        <label htmlFor="claim-tx">{route.sourceName} tx hash</label>
         <input
           id="claim-tx"
           type="text"
           value={txHash}
-          onChange={(e) => setTxHash(e.target.value.trim())}
-          placeholder="0x… origin transferRemote tx hash"
+          onChange={(event) => setTxHash(event.target.value.trim())}
+          placeholder="0x… исходная transferRemote транзакция"
           spellCheck={false}
           autoComplete="off"
         />
         <small className="muted">
-          Этот клейм нужен только если стандартный relayer не доставил message. Для подписи
-          process() нужно немного BNB на BSC (~0.001 BNB на газ).
+          Claim нужен только если relayer не доставил message. Вызов process() подписывается в{' '}
+          {route.destinationName}; для газа нужен небольшой запас {route.gasSymbol}. Вызвать claim
+          может любой адрес — WARD всё равно поступит исходному получателю из message.
         </small>
+        {direction === 'base-to-warden' && (
+          <small className="muted">
+            Проверяется именно Base-транзакция: {BASE_EXPLORER}/tx/0x…
+          </small>
+        )}
       </div>
 
       <button className="primary" onClick={handleLoad} disabled={loading || !txHash}>
-        {loading ? 'Загружаем + собираем подписи…' : 'Загрузить'}
+        {loading ? 'Загружаем + собираем подписи…' : 'Загрузить перевод'}
       </button>
 
       {loadError && <div className="error">{loadError}</div>}
@@ -338,12 +521,14 @@ export function ClaimForm() {
       {prepared && (
         <>
           <dl className="summary">
+            <dt>route</dt>
+            <dd>{preparedRoute.sourceName} → {preparedRoute.destinationName}</dd>
             <dt>messageId</dt>
             <dd className="mono">{prepared.messageId}</dd>
             <dt>merkle index</dt>
             <dd>{prepared.treeIndex}</dd>
-            <dt>recipient (BSC)</dt>
-            <dd className="mono">0x{prepared.parsed.bodyRecipient.slice(-40)}</dd>
+            <dt>recipient ({preparedRoute.destinationName})</dt>
+            <dd className="mono">{prepared.parsed.bodyRecipient}</dd>
             <dt>amount</dt>
             <dd>{formatEther(prepared.parsed.bodyAmount)} WARD</dd>
             <dt>checkpoint root</dt>
@@ -353,7 +538,7 @@ export function ClaimForm() {
               {prepared.signers.length} / {MULTISIG_THRESHOLD}{' '}
               {prepared.signers.length > 0 && (
                 <span className="muted">
-                  ({prepared.signers.map((s) => s.slice(0, 10) + '…').join(', ')})
+                  ({prepared.signers.map((signer) => `${signer.slice(0, 10)}…`).join(', ')})
                 </span>
               )}
             </dd>
@@ -363,20 +548,20 @@ export function ClaimForm() {
 
           {prepared.delivered ? (
             <div className="ok-banner">
-              ✅ Этот message уже доставлен на BSC. Mailbox.delivered(messageId) = true.
+              ✅ Message уже доставлен в {preparedRoute.destinationName}. Повторный claim не нужен.
             </div>
           ) : onWrongChain ? (
             <div className="warn">
               <p>
-                Для подписи process() кошелёк должен быть в BSC (chainId {bscChain.id}). Сейчас:{' '}
-                {chainId}.
+                Для process() кошелёк должен быть в {preparedRoute.destinationName} (chainId{' '}
+                {preparedRoute.destinationChainId}). Сейчас: {chainId}.
               </p>
               <button
                 className="primary"
                 disabled={isSwitching}
-                onClick={() => switchChain({ chainId: bscChain.id })}
+                onClick={() => switchChain({ chainId: preparedRoute.destinationChainId })}
               >
-                {isSwitching ? 'Переключаем…' : 'Переключить на BSC'}
+                {isSwitching ? 'Переключаем…' : `Переключить на ${preparedRoute.destinationName}`}
               </button>
             </div>
           ) : (
@@ -386,25 +571,29 @@ export function ClaimForm() {
               disabled={!isConnected || isWriting || isConfirming || submitting}
             >
               {submitting && !isWriting
-                ? 'Проверяем симуляцию…'
+                ? 'Проверяем и отправляем…'
                 : isWriting
                   ? 'Подтвердите в кошельке…'
                   : isConfirming
-                    ? 'Ждём подтверждения на BSC…'
-                    : 'Подписать process() на BSC'}
+                    ? `Ждём подтверждения в ${preparedRoute.destinationName}…`
+                    : `Подписать process() в ${preparedRoute.destinationName}`}
             </button>
           )}
 
-          {simError && <div className="error">Симуляция отклонена: {simError}</div>}
+          {simError && <div className="error">Claim отклонён: {simError}</div>}
           {writeError && <div className="error">{extractRevert(writeError)}</div>}
 
-          {claimTxHash && (
+          {claimTxHash && claimTxUrl && (
             <div className="result">
-              <HashRow label="BSC claim tx" hash={claimTxHash} href={claimTxUrl!} />
+              <HashRow
+                label={`${preparedRoute.destinationName} claim tx`}
+                hash={claimTxHash}
+                href={claimTxUrl}
+              />
               {isSuccess && (
                 <p className="ok">
-                  ✅ process() прошёл. {formatEther(prepared.parsed.bodyAmount)} WARD выдан
-                  на BSC адрес 0x{prepared.parsed.bodyRecipient.slice(-40)}.
+                  ✅ process() прошёл. {formatEther(prepared.parsed.bodyAmount)} WARD отправлено на{' '}
+                  {prepared.parsed.bodyRecipient} в {preparedRoute.destinationName}.
                 </p>
               )}
             </div>

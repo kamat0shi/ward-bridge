@@ -44,7 +44,8 @@ header h1 { margin: 0 0 6px; font-size: 24px; }
 
 label { font-size: 13px; color: var(--muted); }
 
-input {
+input,
+select {
   background: #0e0e16;
   border: 1px solid var(--border);
   color: var(--text);
@@ -54,7 +55,8 @@ input {
   font-family: var(--mono);
   width: 100%;
 }
-input:focus { outline: none; border-color: var(--accent); }
+input:focus,
+select:focus { outline: none; border-color: var(--accent); }
 
 button.primary {
   background: var(--accent);

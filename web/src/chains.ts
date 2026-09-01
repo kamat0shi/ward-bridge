@@ -1,5 +1,5 @@
 import { createPublicClient, fallback, http, type Chain } from 'viem'
-import { bsc as bscChain } from 'viem/chains'
+import { base as baseChain, bsc as bscChain } from 'viem/chains'
 
 export const wardenProtocol = {
   id: 8765,
@@ -21,12 +21,28 @@ export const BSC_MAILBOX = '0x15eecb285aae883fcff1c3f38552eb9d64ebcb7d' as const
 export const BSC_WARP_TOKEN = '0x6dc200b21894Af4660b549B678ea8df22BF7cfAc' as const
 export const BSC_EXPLORER = 'https://bscscan.com'
 
+export const BASE_MAILBOX = '0x15eecb285aae883fcff1c3f38552eb9d64ebcb7d' as const
+export const BASE_MERKLE_HOOK = '0x2719d412dEcF46dbeb3C478e9099Ab16E53D9fb2' as const
+export const BASE_WARP_TOKEN = '0xf09e4C8193F16019f0573F370F9A997b11f56638' as const
+export const BASE_EXPLORER = 'https://basescan.org'
+
+export const WARDEN_BASE_WARP_TOKEN = '0xC5adAce5E2250e5497Cf1ef7b4f100E10099E4c4' as const
+
 export const bscClient = createPublicClient({
   chain: bscChain,
   transport: fallback([
     http('https://bsc-dataseed.binance.org'),
     http('https://bsc-rpc.publicnode.com'),
     http('https://rpc.ankr.com/bsc'),
+  ]),
+})
+
+export const baseClient = createPublicClient({
+  chain: baseChain,
+  transport: fallback([
+    http('https://mainnet.base.org'),
+    http('https://base-rpc.publicnode.com'),
+    http('https://base.drpc.org'),
   ]),
 })
 
@@ -38,7 +54,7 @@ export const wardenClient = createPublicClient({
 export const WARDEN_MAILBOX = '0x15eecb285aae883fcff1c3f38552eb9d64ebcb7d' as const
 export const WARDEN_MERKLE_HOOK = '0x2719d412dEcF46dbeb3C478e9099Ab16E53D9fb2' as const
 
-export const VALIDATORS = [
+export const WARDEN_VALIDATORS = [
   {
     addr: '0x49cf57fe281fa67b08a156fe4e212d44e1cc5762' as const,
     base: 'https://hyperlane-validator-signatures-liveraven-warden.s3.eu-central-1.amazonaws.com/',
@@ -58,6 +74,21 @@ export const VALIDATORS = [
     addr: '0xec554f998d57aeae5916bd3bbfa255df8428b2ba' as const,
     base: 'https://eq-hyperlane-validator.s3.eu-west-1.amazonaws.com/',
     prefix: 'signatures-warden/',
+  },
+] as const
+
+// The destination ISM on Warden expects Base validators in this exact order.
+// Only two signatures are required, and these two public stores are available.
+export const BASE_VALIDATORS = [
+  {
+    addr: '0xec554f998d57aeae5916bd3bbfa255df8428b2ba' as const,
+    base: 'https://eq-hyperlane-validator.s3.eu-west-1.amazonaws.com/',
+    prefix: 'signatures-base/',
+  },
+  {
+    addr: '0x49cf57fe281fa67b08a156fe4e212d44e1cc5762' as const,
+    base: 'https://hyperlane-validator-signatures-liveraven-base.s3.eu-central-1.amazonaws.com/',
+    prefix: 'base/',
   },
 ] as const
 
