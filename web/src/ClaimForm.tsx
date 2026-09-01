@@ -125,7 +125,10 @@ type CheckpointJson = {
   signature: { r: string; s: string; v: number }
 }
 
-const JINA_PROXY = 'https://r.jina.ai/http://'
+const CHECKPOINT_PROXIES = [
+  (url: string) => `https://proxy.cors.sh/${url}`,
+  (url: string) => `https://r.jina.ai/http://${url}`,
+] as const
 
 function extractRevert(err: unknown): string {
   if (err instanceof BaseError) {
@@ -201,14 +204,21 @@ async function fetchValidatorCheckpoint(
     // S3 does not expose browser CORS headers; use a read-only fallback below.
   }
 
-  try {
-    // A cache buster avoids retaining a pre-publication 404 for a new checkpoint.
-    const viaProxy = await fetchWithTimeout(`${JINA_PROXY}${url}?claim=${Date.now()}`)
-    if (!viaProxy.ok) return null
-    return parseCheckpointText(await viaProxy.text())
-  } catch {
-    return null
+  // Validator S3 buckets do not expose browser CORS headers. Keep independent
+  // read-only fallbacks because either public proxy can be unavailable by region.
+  const cacheBustedUrl = `${url}?claim=${Date.now()}`
+  for (const proxyUrl of CHECKPOINT_PROXIES) {
+    try {
+      const viaProxy = await fetchWithTimeout(proxyUrl(cacheBustedUrl))
+      if (viaProxy.status === 404) continue
+      if (!viaProxy.ok) continue
+      return parseCheckpointText(await viaProxy.text())
+    } catch {
+      // Try the next transport.
+    }
   }
+
+  return null
 }
 
 function assertRouteMessage(parsed: Parsed, route: ClaimRoute) {
